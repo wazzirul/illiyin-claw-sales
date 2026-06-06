@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Upwork Job Review Assistant",
+  "version": "1.0.0",
+  "description": "Assists in reviewing Upwork jobs, applying default business filters, and exporting data to CSV.",
+  "permissions": ["activeTab", "storage", "downloads", "scripting"],
+  "host_permissions": ["https://www.upwork.com/nx/search/jobs/*"],
+  "action": { "default_popup": "popup.html" },
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://www.upwork.com/nx/search/jobs/*"],
+      "js": ["content.js"]
+    }
+  ]
+}
