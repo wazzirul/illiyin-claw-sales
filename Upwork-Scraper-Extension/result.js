@@ -5,9 +5,12 @@ document.addEventListener('DOMContentLoaded', () => {
   const emptyState = document.getElementById('emptyState');
   const searchInput = document.getElementById('searchInput');
   const actionFilter = document.getElementById('actionFilter');
-  const exportBtn = document.getElementById('exportBtn');
+  const exportAllBtn = document.getElementById('exportAllBtn');
+  const exportReviewBtn = document.getElementById('exportReviewBtn');
+  const deleteRejectedBtn = document.getElementById('deleteRejectedBtn');
   const resetBtn = document.getElementById('resetBtn');
   const backToUpworkBtn = document.getElementById('backToUpworkBtn');
+  const summaryLine = document.getElementById('summaryLine');
 
   let allJobs = [];
 
@@ -18,8 +21,23 @@ document.addEventListener('DOMContentLoaded', () => {
   searchInput.addEventListener('input', renderJobs);
   actionFilter.addEventListener('change', renderJobs);
 
-  exportBtn.addEventListener('click', () => {
+  exportAllBtn.addEventListener('click', () => {
     chrome.runtime.sendMessage({ action: 'EXPORT_CSV' });
+  });
+
+  exportReviewBtn.addEventListener('click', () => {
+    chrome.runtime.sendMessage({ action: 'EXPORT_CSV', filter: 'review' });
+  });
+
+  deleteRejectedBtn.addEventListener('click', () => {
+    if (confirm('Delete all rejected jobs? This will permanently remove every job marked as "Reject" from local storage.')) {
+      chrome.runtime.sendMessage({ action: 'DELETE_REJECTED' }, (response) => {
+        if (response && response.success) {
+          alert('Deleted ' + (response.removedCount || 0) + ' rejected job(s).');
+          loadJobs();
+        }
+      });
+    }
   });
 
   resetBtn.addEventListener('click', () => {
@@ -34,9 +52,13 @@ document.addEventListener('DOMContentLoaded', () => {
     chrome.tabs.create({ url: 'https://www.upwork.com/nx/search/jobs/' });
   });
 
-  // Listen for messages from background (e.g., after reset or export)
+  // Listen for messages from background
   chrome.runtime.onMessage.addListener((message) => {
-    if (message.action === 'RESET_COMPLETE' || message.action === 'EXPORT_COMPLETE') {
+    if (
+      message.action === 'RESET_COMPLETE' ||
+      message.action === 'EXPORT_COMPLETE' ||
+      message.action === 'REJECTED_DELETED'
+    ) {
       loadJobs();
     }
   });
@@ -69,7 +91,21 @@ document.addEventListener('DOMContentLoaded', () => {
       return true;
     });
 
+    // --- Summary line ---
+    const total = allJobs.length;
+    const reviewCount = allJobs.filter(j => (j.recommended_action || 'review') === 'review').length;
+    const rejectCount = total - reviewCount;
+    if (summaryLine) {
+      summaryLine.textContent = `${total} total jobs: ${reviewCount} for review, ${rejectCount} rejected`;
+    }
+
+    // --- Table body ---
     jobsTableBody.innerHTML = '';
+
+    // Update button states: disable delete-rejected if no rejects remain
+    if (deleteRejectedBtn) {
+      deleteRejectedBtn.disabled = rejectCount === 0;
+    }
 
     if (filteredJobs.length === 0) {
       emptyState.style.display = 'block';
@@ -118,6 +154,9 @@ document.addEventListener('DOMContentLoaded', () => {
         <td>${budgetDisplay}</td>
         <td class="${paymentClass}">${paymentText}</td>
         <td>${job.client_country || 'Unknown'}</td>
+        <td>${job.total_feedback || 'No feedback yet'}</td>
+        <td>${job.total_spent || '$0'}</td>
+        <td>${job.proposals || 'None'}</td>
         <td>${riskFlagsHtml}</td>
         <td><span class="action-badge ${actionClass}">${actionText}</span></td>
         <td>${capturedAt}</td>

@@ -1,6 +1,7 @@
 document.addEventListener("DOMContentLoaded", () => {
   const tabStatus = document.getElementById("tab-status");
   const captureBtn = document.getElementById("captureBtn");
+  const captureThisPageBtn = document.getElementById("captureThisPageBtn");
   const resultsBtn = document.getElementById("resultsBtn");
   const exportBtn = document.getElementById("exportBtn");
   const resetBtn = document.getElementById("resetBtn");
@@ -16,17 +17,49 @@ document.addEventListener("DOMContentLoaded", () => {
   const lastExportTime = document.getElementById("lastExportTime");
   const lastResetTime = document.getElementById("lastResetTime");
 
-  // Load settings and stats
-  chrome.storage.local.get(["filters", "stats"], (result) => {
+  // Load settings, stats, and last captured URL state
+  chrome.storage.local.get(["filters", "stats", "lastCapturedUrl"], (result) => {
     if (result.filters) {
       fixedMinInput.value = result.filters.fixedMin ?? 500;
       hourlyMinInput.value = result.filters.hourlyMin ?? 15;
       paymentVerifiedInput.checked = result.filters.paymentVerified ?? true;
     }
     updateStats(result.stats);
+    
+    // Check if the current URL matches the last captured URL to determine the visibility and state of buttons
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const tab = tabs[0];
+      if (tab && tab.url && tab.url.startsWith("https://www.upwork.com/nx/search/jobs/")) {
+        tabStatus.textContent = "Supported Page";
+        tabStatus.classList.remove("unsupported");
+        tabStatus.classList.add("supported");
+        
+        const lastUrl = result.lastCapturedUrl || "";
+        if (lastUrl === tab.url) {
+          // If URL matches last captured URL, show "Capture This Page" but disable it
+          captureBtn.style.display = "none";
+          captureThisPageBtn.style.display = "block";
+          captureThisPageBtn.disabled = true;
+          captureThisPageBtn.textContent = "Capture This Page (Captured)";
+        } else {
+          // If URL changed (e.g. user navigated / pagination), show "Capture This Page" active
+          captureBtn.style.display = "none";
+          captureThisPageBtn.style.display = "block";
+          captureThisPageBtn.disabled = false;
+          captureThisPageBtn.textContent = "Capture This Page";
+        }
+      } else {
+        tabStatus.textContent = "Unsupported Page";
+        tabStatus.classList.remove("supported");
+        tabStatus.classList.add("unsupported");
+        captureBtn.style.display = "block";
+        captureBtn.disabled = true;
+        captureThisPageBtn.style.display = "none";
+      }
+    });
   });
 
-  // Check current tab
+  // Re-check current tab periodically or when popup is loaded
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     const tab = tabs[0];
     if (
@@ -37,12 +70,10 @@ document.addEventListener("DOMContentLoaded", () => {
       tabStatus.textContent = "Supported Page";
       tabStatus.classList.remove("unsupported");
       tabStatus.classList.add("supported");
-      captureBtn.disabled = false;
     } else {
       tabStatus.textContent = "Unsupported Page";
       tabStatus.classList.remove("supported");
       tabStatus.classList.add("unsupported");
-      captureBtn.disabled = true;
     }
   });
 
@@ -74,6 +105,28 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
+  // Capture This Page
+  captureThisPageBtn.addEventListener("click", () => {
+    captureThisPageBtn.disabled = true;
+    captureThisPageBtn.textContent = "Capturing...";
+    
+    // Store current tab URL as last captured URL once capture starts/completes
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const tab = tabs[0];
+      if (tab && tab.url) {
+        chrome.storage.local.set({ lastCapturedUrl: tab.url });
+      }
+    });
+
+    chrome.runtime.sendMessage({ action: "START_CAPTURE" }, (response) => {
+      if (chrome.runtime.lastError) {
+        captureThisPageBtn.textContent = "Capture This Page";
+        captureThisPageBtn.disabled = false;
+        alert("Capture failed: " + chrome.runtime.lastError.message);
+      }
+    });
+  });
+
   // Open Results
   resultsBtn.addEventListener("click", () => {
     chrome.tabs.create({ url: chrome.runtime.getURL("result.html") });
@@ -99,14 +152,22 @@ document.addEventListener("DOMContentLoaded", () => {
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.action === "CAPTURE_COMPLETE") {
       captureBtn.textContent = "Capture Current Page";
-      // Re-check if still supported in case tab changed
+      
+      // Update the "Capture This Page" button state based on the current URL
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
         const tab = tabs[0];
-        captureBtn.disabled = !(
-          tab &&
-          tab.url &&
-          tab.url.startsWith("https://www.upwork.com/nx/search/jobs/")
-        );
+        if (tab && tab.url && tab.url.startsWith("https://www.upwork.com/nx/search/jobs/")) {
+          chrome.storage.local.get(["lastCapturedUrl"], (result) => {
+            const lastUrl = result.lastCapturedUrl || "";
+            if (lastUrl === tab.url) {
+              captureThisPageBtn.disabled = true;
+              captureThisPageBtn.textContent = "Capture This Page (Captured)";
+            } else {
+              captureThisPageBtn.disabled = false;
+              captureThisPageBtn.textContent = "Capture This Page";
+            }
+          });
+        }
       });
 
       if (message.stats) {

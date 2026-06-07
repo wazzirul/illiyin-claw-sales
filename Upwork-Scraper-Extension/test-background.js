@@ -1,6 +1,7 @@
 /**
  * Unit tests for background.js logic
- * Tests filtering, deduplication, CSV export, and message handling
+ * Tests filtering, deduplication, CSV export, delete-rejected,
+ * and message handling.
  * Run: node test-background.js
  */
 
@@ -62,6 +63,25 @@ function processJobs(rawJobs, filters, existingJobs) {
   return { newJobs, addedCount, allJobs: [...existingJobs, ...newJobs] };
 }
 
+// --- Simulate the delete-rejected logic ---
+function deleteRejected(allJobs) {
+  const kept = allJobs.filter(
+    (j) => (j.recommended_action || 'review') !== 'reject',
+  );
+  const removedCount = allJobs.length - kept.length;
+  return { kept, removedCount };
+}
+
+// --- Simulate CSV export with filter ---
+function filterJobsForExport(allJobs, filter) {
+  if (filter === 'review') {
+    return allJobs.filter(
+      (j) => (j.recommended_action || 'review') === 'review',
+    );
+  }
+  return allJobs;
+}
+
 // --- Test 1: Default filters ---
 console.log('\n=== Test: Default filter logic ===');
 const defaultFilters = { fixedMin: 500, hourlyMin: 15, paymentVerified: true };
@@ -96,7 +116,6 @@ const unknownPaymentJob = { job_id: 'j6', budget_type: 'fixed', budget_min: 1000
 result = processJobs([unknownPaymentJob], defaultFilters, []);
 assert(result.newJobs[0].recommended_action === 'review', 'Unknown payment -> review');
 
-// Payment filter disabled
 const noPaymentFilter = { fixedMin: 500, hourlyMin: 15, paymentVerified: false };
 result = processJobs([unverifiedJob], noPaymentFilter, []);
 assert(result.newJobs[0].recommended_action === 'review', 'Unverified but filter disabled -> review');
@@ -164,7 +183,6 @@ const csv = buildCsv([sampleJob]);
 const lines = csv.split('\n');
 assert(lines.length === 2, 'CSV has header + 1 data row');
 assert(lines[0].startsWith('job_id,source,'), 'CSV header starts correctly');
-// Title has commas and quotes - should be escaped
 assert(lines[1].includes('"Build a ""great"" CRM, with automation"'), 'Title with commas and quotes is properly escaped');
 assert(lines[1].includes('"Need someone who can build, test, and deploy."'), 'Description with commas is properly escaped');
 
@@ -179,15 +197,80 @@ result = processJobs([nullBudgetJob], defaultFilters, []);
 assert(result.newJobs[0].recommended_action === 'review', 'Unknown budget + unknown payment -> review');
 assert(result.newJobs[0].risk_flags === '', 'Unknown budget has no risk flags (not below threshold)');
 
-// --- Test 7: Critical bug check - sender.tab in popup context ---
-console.log('\n=== Test: Critical architecture check ===');
-// In background.js, handleCapture(sender.tab.id) is called when message comes from popup.
-// But popup messages have sender.tab = undefined because popup is not a tab content script.
-// The correct approach: use chrome.tabs.query to get the active tab.
+// --- Test 7: Delete rejected ---
+console.log('\n=== Test: Delete rejected logic ===');
+const mixedJobs = [
+  { job_id: 'a1', recommended_action: 'review' },
+  { job_id: 'a2', recommended_action: 'reject' },
+  { job_id: 'a3', recommended_action: 'reject' },
+  { job_id: 'a4', recommended_action: 'review' },
+  { job_id: 'a5' },  // no recommended_action — should be kept
+];
+const delResult = deleteRejected(mixedJobs);
+assert(delResult.removedCount === 2, 'Delete rejected removes 2 jobs (a2, a3)');
+assert(delResult.kept.length === 3, '3 jobs kept (a1, a4, a5 - a5 has no action, treated as review)');
+assert(delResult.kept.every(j => (j.recommended_action || 'review') !== 'reject'), 'All kept jobs have non-reject action');
 
-// Simulate what happens when popup sends START_CAPTURE
-const popupSender = { id: 'extension-id' }; // No tab property!
-const senderTabId = popupSender.tab?.id; // undefined
+// Edge: all reject
+const allReject = [{ job_id: 'x1', recommended_action: 'reject' }];
+const allRejResult = deleteRejected(allReject);
+assert(allRejResult.removedCount === 1, 'Single reject -> removed, 0 kept');
+assert(allRejResult.kept.length === 0, 'Kept array is empty');
+
+// Edge: all review
+const allReview = [{ job_id: 'y1', recommended_action: 'review' }];
+const allRevResult = deleteRejected(allReview);
+assert(allRevResult.removedCount === 0, 'All review -> nothing removed');
+assert(allRevResult.kept.length === 1, 'All review -> all kept');
+
+// Edge: empty list
+const emptyResult = deleteRejected([]);
+assert(emptyResult.removedCount === 0, 'Empty list -> 0 removed');
+assert(emptyResult.kept.length === 0, 'Empty list -> 0 kept');
+
+// --- Test 8: Filtered CSV export ---
+console.log('\n=== Test: Filtered CSV export logic ===');
+const exportJobs = [
+  { job_id: 'e1', recommended_action: 'review', title: 'Review job' },
+  { job_id: 'e2', recommended_action: 'reject', title: 'Reject job' },
+  { job_id: 'e3', title: 'No-action job' },
+  { job_id: 'e4', recommended_action: 'review', title: 'Review job 2' },
+];
+
+// Export all (filter = undefined / 'all')
+const allExport = filterJobsForExport(exportJobs, undefined);
+assert(allExport.length === 4, 'Export all -> all 4 jobs');
+
+const allExport2 = filterJobsForExport(exportJobs, 'all');
+assert(allExport2.length === 4, 'Export with filter="all" -> all 4 jobs');
+
+// Export review only
+const reviewExport = filterJobsForExport(exportJobs, 'review');
+assert(reviewExport.length === 3, 'Export review only -> 3 jobs (e1, e3, e4)');
+assert(reviewExport.every(j => (j.recommended_action || 'review') === 'review'), 'All exported jobs are review-only');
+assert(!reviewExport.some(j => j.job_id === 'e2'), 'Reject job e2 is NOT in the review export');
+
+// Edge: filter with no review jobs
+const onlyReject = [{ job_id: 'r1', recommended_action: 'reject' }];
+const noReviewResult = filterJobsForExport(onlyReject, 'review');
+assert(noReviewResult.length === 0, 'No review jobs -> empty array for review export');
+
+// --- Test 9: Summary line counts ---
+console.log('\n=== Test: Summary line counts ===');
+function computeSummary(jobs) {
+  const total = jobs.length;
+  const reviewCount = jobs.filter(j => (j.recommended_action || 'review') === 'review').length;
+  const rejectCount = total - reviewCount;
+  return `${total} total jobs: ${reviewCount} for review, ${rejectCount} rejected`;
+}
+assert(computeSummary(mixedJobs) === '5 total jobs: 3 for review, 2 rejected', 'Mixed: 5 total, 3 review, 2 reject');
+assert(computeSummary(allReject) === '1 total jobs: 0 for review, 1 rejected', 'All reject: 1 total, 0 review');
+assert(computeSummary([]) === '0 total jobs: 0 for review, 0 rejected', 'Empty: zeros across the board');
+
+// --- Test 10: Critical bug check - sender.tab in popup context ---
+console.log('\n=== Test: Critical architecture check ===');
+const popupSender = { id: 'extension-id' };
+const senderTabId = popupSender.tab?.id;
 assert(senderTabId === undefined, 'BUG CONFIRMED: sender.tab.id is undefined when message comes from popup');
 assert(true, 'FIX NEEDED: background.js should use chrome.tabs.query({active: true, currentWindow: true}) instead of sender.tab.id');
 

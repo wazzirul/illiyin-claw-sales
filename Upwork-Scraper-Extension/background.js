@@ -10,11 +10,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         console.error("Capture failed:", err);
         sendResponse({ success: false, error: err.message });
       });
-    return true; // Keep message channel open for async response
+    return true;
   }
 
   if (message.action === "EXPORT_CSV") {
-    handleExportCsv();
+    handleExportCsv(message.filter);
     sendResponse({ success: true });
   }
 
@@ -22,15 +22,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     handleResetData();
     sendResponse({ success: true });
   }
+
+  if (message.action === "DELETE_REJECTED") {
+    handleDeleteRejected()
+      .then((removedCount) => sendResponse({ success: true, removedCount }))
+      .catch((err) => {
+        console.error("Delete rejected failed:", err);
+        sendResponse({ success: false, error: err.message });
+      });
+    return true;
+  }
 });
 
 async function getActiveTabId(sender) {
-  // When message comes from a content script, sender.tab is available
   if (sender.tab && sender.tab.id) {
     return sender.tab.id;
   }
-  // When message comes from popup, sender.tab is undefined,
-  // so we query for the active tab in the current window
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tabs || tabs.length === 0) {
     throw new Error("No active tab found");
@@ -40,23 +47,19 @@ async function getActiveTabId(sender) {
 
 async function handleCapture(tabId) {
   try {
-    // Ensure content script is injected (it may not be if extension was reloaded while page was open)
     try {
       await chrome.tabs.sendMessage(tabId, { action: "PING" });
     } catch (e) {
-      // Content script not injected yet, inject it now
       console.log("Content script not found, injecting...");
       await chrome.scripting.executeScript({
         target: { tabId: tabId },
         files: ["content.js"],
       });
-      // Give it a moment to initialize
       await new Promise((r) => setTimeout(r, 100));
     }
 
-    // 1. Ask content script to parse visible jobs
     const response = await chrome.tabs.sendMessage(tabId, {
-      action: "CAPTURE_VISIBLE_JOBS",
+      action: "HUMANIZE_AND_CAPTURE",
     });
 
     if (!response || !response.jobs || response.jobs.length === 0) {
@@ -65,7 +68,6 @@ async function handleCapture(tabId) {
       return;
     }
 
-    // 2. Get current filters
     const storageData = await chrome.storage.local.get(["filters", "jobs"]);
     const filters = storageData.filters || {
       fixedMin: 500,
@@ -75,22 +77,18 @@ async function handleCapture(tabId) {
     const existingJobs = storageData.jobs || [];
     const existingJobIds = new Set(existingJobs.map((j) => j.job_id));
 
-    // 3. Process and filter new jobs
     const now = new Date().toISOString();
     const newJobs = [];
     let addedCount = 0;
 
     for (const job of response.jobs) {
-      // Deduplication
       if (existingJobIds.has(job.job_id)) {
         continue;
       }
 
-      // Apply default business filters
       const riskFlags = [];
       let recommendedAction = "review";
 
-      // Budget checks
       if (job.budget_type === "fixed" && job.budget_min < filters.fixedMin) {
         riskFlags.push("low_budget");
         recommendedAction = "reject";
@@ -102,7 +100,6 @@ async function handleCapture(tabId) {
         recommendedAction = "reject";
       }
 
-      // Payment verification check
       if (
         filters.paymentVerified &&
         job.payment_method_verified === "unverified"
@@ -113,7 +110,6 @@ async function handleCapture(tabId) {
         recommendedAction = "review";
       }
 
-      // Finalize job object
       const processedJob = {
         ...job,
         risk_flags: riskFlags.join(";"),
@@ -126,11 +122,9 @@ async function handleCapture(tabId) {
       addedCount++;
     }
 
-    // 4. Save to storage
     const updatedJobs = [...existingJobs, ...newJobs];
     await chrome.storage.local.set({ jobs: updatedJobs });
 
-    // 5. Update stats and notify popup
     const stats = {
       lastCaptureCount: addedCount,
       totalSavedJobs: updatedJobs.length,
@@ -143,21 +137,36 @@ async function handleCapture(tabId) {
   }
 }
 
-async function handleExportCsv() {
+async function handleExportCsv(filter) {
   try {
     const storageData = await chrome.storage.local.get(["jobs"]);
-    const jobs = storageData.jobs || [];
+    const allJobs = storageData.jobs || [];
 
-    if (jobs.length === 0) {
-      alert("No jobs to export.");
+    if (allJobs.length === 0) {
+      console.warn("No jobs to export.");
+      notifyPopup("EXPORT_COMPLETE", { stats: {}, empty: true });
       return;
     }
 
-    // Confirm before export
-    // Note: We can't use window.confirm in background script easily,
-    // so we rely on the popup to show a confirmation or just proceed if triggered from popup.
-    // For simplicity, we'll proceed, but the plan mentions a confirmation.
-    // We'll add a note in the CSV or handle it via popup message if needed.
+    let jobs;
+    let filename;
+    if (filter === "review") {
+      jobs = allJobs.filter(
+        (j) => (j.recommended_action || "review") === "review",
+      );
+      const ts = new Date().toISOString().replace(/:/g, "-");
+      filename = `scraped-jobs-review-${ts}.csv`;
+    } else {
+      jobs = allJobs;
+      const ts2 = new Date().toISOString().replace(/:/g, "-");
+      filename = `scraped-jobs-list-${ts2}.csv`;
+    }
+
+    if (jobs.length === 0) {
+      console.warn("No jobs match the requested filter:", filter);
+      notifyPopup("EXPORT_COMPLETE", { stats: {}, empty: true });
+      return;
+    }
 
     const headers = [
       "job_id",
@@ -172,6 +181,10 @@ async function handleExportCsv() {
       "client_country",
       "posted_at",
       "required_skills",
+      "experience_level",
+      "proposals",
+      "total_feedback",
+      "total_spent",
       "fit_score",
       "risk_flags",
       "recommended_action",
@@ -184,7 +197,6 @@ async function handleExportCsv() {
     for (const job of jobs) {
       const row = headers.map((header) => {
         let value = job[header] ?? "";
-        // Escape quotes and wrap in quotes if contains comma or newline
         if (
           typeof value === "string" &&
           (value.includes(",") || value.includes('"') || value.includes("\n"))
@@ -197,20 +209,25 @@ async function handleExportCsv() {
     }
 
     const csvContent = csvRows.join("\n");
-    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
 
-    const filename = `scraped-jobs-list-${new Date().toISOString().slice(0, 10)}.csv`;
+    // In Manifest V3 service workers, Blob and URL.createObjectURL
+    // don't exist. Use a data URL instead.
+    const dataUrl =
+      "data:text/csv;charset=utf-8," + encodeURIComponent(csvContent);
 
     await chrome.downloads.download({
-      url: url,
+      url: dataUrl,
       filename: filename,
       saveAs: true,
     });
 
     const stats = { lastExportTime: new Date().toISOString() };
     await updateStats(stats);
-    notifyPopup("EXPORT_COMPLETE", { stats });
+    notifyPopup("EXPORT_COMPLETE", {
+      stats,
+      filter,
+      exportedCount: jobs.length,
+    });
   } catch (error) {
     console.error("Error exporting CSV:", error);
   }
@@ -228,6 +245,33 @@ async function handleResetData() {
     notifyPopup("RESET_COMPLETE", { stats });
   } catch (error) {
     console.error("Error resetting data:", error);
+  }
+}
+
+async function handleDeleteRejected() {
+  try {
+    const storageData = await chrome.storage.local.get(["jobs"]);
+    const allJobs = storageData.jobs || [];
+    const kept = allJobs.filter(
+      (j) => (j.recommended_action || "review") !== "reject",
+    );
+    const removedCount = allJobs.length - kept.length;
+
+    await chrome.storage.local.set({ jobs: kept });
+
+    const stats = { totalSavedJobs: kept.length };
+    await updateStats(stats);
+
+    notifyPopup("REJECTED_DELETED", {
+      removedCount,
+      remaining: kept.length,
+      stats,
+    });
+
+    return removedCount;
+  } catch (error) {
+    console.error("Error deleting rejected jobs:", error);
+    throw error;
   }
 }
 

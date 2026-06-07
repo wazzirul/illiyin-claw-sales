@@ -4,17 +4,27 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Upwork Job Review Assistant - Results</title>
+    <link rel="icon" type="image/png" sizes="32x32" href="icons/icon32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="icons/icon16.png" />
     <link rel="stylesheet" href="result.css" />
   </head>
   <body>
     <div class="header">
       <h1>Upwork Job Review Assistant - Results</h1>
       <div class="actions">
-        <button id="exportBtn" class="btn btn-primary">Export CSV</button>
+        <button id="exportAllBtn" class="btn btn-primary">
+          Export All CSV
+        </button>
+        <button id="exportReviewBtn" class="btn">Export Review Only CSV</button>
+        <button id="deleteRejectedBtn" class="btn btn-warning">
+          Delete Rejected
+        </button>
         <button id="resetBtn" class="btn btn-danger">Reset All Data</button>
         <button id="backToUpworkBtn" class="btn">Open Upwork Search</button>
       </div>
     </div>
+
+    <div class="summary-line" id="summaryLine"></div>
 
     <div class="warning-box">
       Confirm that this data was collected from pages you opened manually and
@@ -42,6 +52,9 @@
             <th>Budget</th>
             <th>Payment</th>
             <th>Client Country</th>
+            <th>Feedback</th>
+            <th>Spent</th>
+            <th>Proposals</th>
             <th>Risk Flags</th>
             <th>Action</th>
             <th>Captured At</th>
