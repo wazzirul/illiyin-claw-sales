@@ -1,2 +1,0 @@
-job_id,source,source_url,title,description,budget_type,budget_min,budget_max,payment_method_verified,client_country,posted_at,required_skills,manual_notes
-manual-20260606-001,manual_paste,,Build CRM automation in Airtable,"Paste job description here",fixed,500,1500,verified,United States,2026-06-06T09:00:00+07:00,"automation;airtable;zapier","Example row. Replace with manually collected sample."
